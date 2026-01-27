@@ -244,6 +244,4 @@ async def chat_endpoint(request: ResearchChat):
                             # uae_properties["results"][i] = extract_property_data(prop)
                             uae_properties.append(extract_property_data(prop))
 
-        
-
     return {"session_id": session_id, "google_search_response": google_search_response_message, "uae_properties": uae_properties, "ai_message": ai_message}
