@@ -36,53 +36,115 @@ class ResponseFormat(BaseModel):
     about: str
     image_urls: List[str]
     
-def fetch_uae_properties(
-    purpose: str,
-    property_type: str,
-    completion_status: str
-):
-    url = "https://uae-real-estate-data-real-time-api.p.rapidapi.com/listings/search"
+# def fetch_uae_properties(
+#     purpose: str,
+#     property_type: str,
+#     completion_status: str
+# ):
+#     url = "https://uae-real-estate-data-real-time-api.p.rapidapi.com/listings/search"
 
+#     headers = {
+#         "x-rapidapi-key": RAPIDAPI_KEY,
+#         "x-rapidapi-host": "uae-real-estate-data-real-time-api.p.rapidapi.com"
+#     }
+
+#     params = {
+#         "purpose": purpose,
+#         "property_type": property_type,
+#         "completion_status": completion_status
+#     }
+
+#     response = requests.get(url, headers=headers, params=params, timeout=10)
+#     response.raise_for_status()
+#     return response.json()
+
+# uae_property_schema = {
+#     "name": "fetch_uae_properties",
+#     "description": "Fetch UAE real estate listings using purpose, property type, and completion status",
+#     "parameters": {
+#         "type": "object",
+#         "properties": {
+#             "purpose": {
+#                 "type": "string",
+#                 "description": "for-rent or for-sale"
+#             },
+#             "property_type": {
+#                 "type": "string",
+#                 "description": "apartments, villas, townhouses"
+#             },
+#             "completion_status": {
+#                 "type": "string",
+#                 "description": "completed or off-plan"
+#             }
+#         },
+#         "required": ["purpose", "property_type", "completion_status"]
+#     }
+# }
+
+# uae_property_tool = types.Tool(
+#     function_declarations=[uae_property_schema]
+# )
+
+def loopnet_search_by_city(city: str):
+    # Step 1: Find city
+    city_url = "https://loopnet-api.p.rapidapi.com/loopnet/helper/findCity"
     headers = {
         "x-rapidapi-key": RAPIDAPI_KEY,
-        "x-rapidapi-host": "uae-real-estate-data-real-time-api.p.rapidapi.com"
+        "x-rapidapi-host": "loopnet-api.p.rapidapi.com",
+        "Content-Type": "application/json"
     }
 
-    params = {
-        "purpose": purpose,
-        "property_type": property_type,
-        "completion_status": completion_status
+    city_payload = {"keywords": city}
+
+    city_res = requests.post(
+        city_url, json=city_payload, headers=headers, timeout=10
+    )
+    city_res.raise_for_status()
+    city_data = city_res.json()
+
+    if not city_data.get("data"):
+        return {"error": "City not found"}
+
+    location_id = city_data["data"][0]["id"]
+
+    # Step 2: Property search
+    property_url = "https://loopnet-api.p.rapidapi.com/loopnet/sale/advanceSearch"
+
+    property_payload = {
+        "locationId": location_id,
+        "locationType": "city",
+        "page": 1,
+        "size": 20,
+        "auctions": False
     }
 
-    response = requests.get(url, headers=headers, params=params, timeout=10)
-    response.raise_for_status()
-    return response.json()
+    property_res = requests.post(
+        property_url, json=property_payload, headers=headers, timeout=10
+    )
+    property_res.raise_for_status()
 
-uae_property_schema = {
-    "name": "fetch_uae_properties",
-    "description": "Fetch UAE real estate listings using purpose, property type, and completion status",
+    return {
+        "city": city_data["data"][0],
+        "properties": property_res.json()
+    }
+
+loopnet_search_schema = {
+    "name": "loopnet_search_by_city",
+    "description": "Find properties by city name. Automatically resolves city ID and fetches listings.",
     "parameters": {
         "type": "object",
         "properties": {
-            "purpose": {
+            "city": {
                 "type": "string",
-                "description": "for-rent or for-sale"
-            },
-            "property_type": {
-                "type": "string",
-                "description": "apartments, villas, townhouses"
-            },
-            "completion_status": {
-                "type": "string",
-                "description": "completed or off-plan"
+                "description": "City name, e.g. Los Angeles"
             }
         },
-        "required": ["purpose", "property_type", "completion_status"]
+        "required": ["city"]
     }
 }
 
-uae_property_tool = types.Tool(
-    function_declarations=[uae_property_schema]
+loopnet_tool = types.Tool(
+    function_declarations=[loopnet_search_schema]
 )
 
 class ResearchChat(BaseModel):
@@ -103,7 +165,7 @@ async def chat_endpoint(request: ResearchChat):
     session_id = get_or_create_session(sessions, request.session_id)
     ai_message = ""
     google_search_response_message = {}
-    uae_property_data = {}
+    loopnet_data = []
    
     conversation_text = ""
     for m in sessions[session_id]:
@@ -163,30 +225,46 @@ async def chat_endpoint(request: ResearchChat):
         except json.JSONDecodeError:
             google_search_response_message = {}
 
-        property_response_from_attom = gemini_client.models.generate_content(
+        response = gemini_client.models.generate_content(
             model=GEMINI_MODEL,
             config=types.GenerateContentConfig(
-                system_instruction="Fetch property data using the provided tool.",
-                tools=[uae_property_tool]
+                system_instruction="Fetch property data using available tools.",
+                tools=[loopnet_tool]
             ),
             contents=conversation_text
         )
-        
-        uae_property_call = None
 
-        candidates = property_response_from_attom.candidates or []
-        if candidates:
-            parts = candidates[0].content.parts or []
-            for part in parts:
-                if part.function_call:
-                    uae_property_call = part.function_call
-                    break
+        # loopnet_response = gemini_client.models.generate_content(
+        #     model=GEMINI_MODEL,
+        #     config=types.GenerateContentConfig(
+        #         system_instruction="Fetch property data using the provided tool.",
+        #         tools=[loopnet_tool]
+        #     ),
+        #     contents=conversation_text
+        # )
         
-        if uae_property_call:
-            uae_property_data = fetch_uae_properties(
-                purpose=uae_property_call.args["purpose"],
-                property_type=uae_property_call.args["property_type"],
-                completion_status=uae_property_call.args["completion_status"]
-            )
+        for candidate in response.candidates or []:
+            for part in candidate.content.parts or []:
+                if not part.function_call:
+                    continue
 
-    return {"session_id": session_id, "google_search_response": google_search_response_message, "uae_property_data": uae_property_data, "ai_message": ai_message}
+                elif part.function_call.name == "loopnet_search_by_city":
+                    loopnet__all_data = loopnet_search_by_city(
+                        **part.function_call.args
+                    )
+                    
+                    loopnet_properties = loopnet__all_data.get("properties", {}).get("data", [])
+                    for listing in loopnet_properties:
+                        extracted_listing = {
+                            "price": listing.get("price"),
+                            "fullPrice": listing.get("fullPrice"),
+                            "title": " ".join(listing.get("title", [])) if listing.get("title") else None,
+                            "notes": " ".join(listing.get("notes", [])) if listing.get("notes") else None,
+                            "photo": listing.get("photo"),
+                            "location": listing.get("location", {}).get("name") if listing.get("location") else None,
+                            "brokerName": listing.get("brokerName"),
+                            "brokerPhoto": listing.get("brokerPhoto")
+                        }
+                        loopnet_data.append(extracted_listing)
+
+    return {"session_id": session_id, "google_search_response": google_search_response_message, "loopnet_data": loopnet_data, "ai_message": ai_message}
