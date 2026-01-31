@@ -7,12 +7,23 @@ from google.genai import types
 import requests
 from typing import List
 import json
+from langchain_community.utilities import SQLDatabase
+from langchain_community.agent_toolkits import create_sql_agent
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 env_vars = dotenv_values(".env")
 GEMINI_API_KEY = env_vars.get("GEMINI_API_KEY")
 RAPIDAPI_KEY = env_vars.get("RAPIDAPI_KEY")
 
 GEMINI_MODEL = "gemini-3-flash-preview"
+
+db = SQLDatabase.from_uri("sqlite:///data/db.sqlite3")
+llm  = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", api_key=GEMINI_API_KEY)
+sql_agent = create_sql_agent(
+    llm=llm,
+    db=db,
+    verbose=True,
+)
 
 def extract_property_data(property_data: dict) -> dict:
     return {
@@ -31,13 +42,15 @@ def extract_property_data(property_data: dict) -> dict:
 
         "broker": {
             "name": property_data.get("agent", {}).get("name"),
-            "agency": property_data.get("agency", {}).get("name")
+            "agency": property_data.get("agency", {}).get("name"),
+            "profile_image": property_data.get("agent", {}).get("profile_image"),
         },
 
         "contact": {
             "mobile": property_data.get("agent", {}).get("contact", {}).get("mobile"),
             "phone": property_data.get("agent", {}).get("contact", {}).get("phone"),
-            "whatsapp": property_data.get("agent", {}).get("contact", {}).get("whatsapp")
+            "whatsapp": property_data.get("agent", {}).get("contact", {}).get("whatsapp"),
+            "email": property_data.get("agent", {}).get("contact", {}).get("email", "") 
         },
 
         "property_details": {
@@ -87,11 +100,13 @@ class PropertyDetails(BaseModel):
 class BrokerInfo(BaseModel):
     name: str
     agency: str
+    profile_image: str | None = None
     
 class ContactInfo(BaseModel):
     mobile: str | None = None
     phone: str | None = None
     whatsapp: str | None = None
+    email: str | None = None
     
 class ResponseFormat(BaseModel):
     price: str
@@ -103,6 +118,10 @@ class ResponseFormat(BaseModel):
     # image_urls: List[str]
     broker: BrokerInfo
     contact: ContactInfo
+    
+class DatabaseResponseFormat(BaseModel):
+    items: List[ResponseFormat]
+    
 
 class ResearchChat(BaseModel):
     session_id: str | None = None
@@ -162,6 +181,7 @@ async def chat_endpoint(request: ResearchChat):
     ai_message = ""
     google_search_response_message = {}
     uae_properties = []
+    database_fetched_formatted_response = []
    
     conversation_text = ""
     for m in sessions[session_id]:
@@ -243,5 +263,23 @@ async def chat_endpoint(request: ResearchChat):
                         for i, prop in enumerate(uae_properties_data.get("results", [])):
                             # uae_properties["results"][i] = extract_property_data(prop)
                             uae_properties.append(extract_property_data(prop))
+    
 
-    return {"session_id": session_id, "google_search_response": google_search_response_message, "uae_properties": uae_properties, "ai_message": ai_message}
+        database_fetch_response = sql_agent.invoke(
+            {"input": conversation_text + " Provide full details of property like description, total_clicks, area_sqft, baths, beds, currency, location, price, about_property, highlights, status and agent full_name, agent email , agent phone. Return the response in a list. make sure the data come in in descending order based on total_clicks. never use limit in query. and also make sure all the that property fetch status is 'published'"}
+        )
+        database_informal_response = database_fetch_response["output"]
+        database_fetched_response_in_formatted = gemini_client.models.generate_content(
+            model=GEMINI_MODEL,
+            config=types.GenerateContentConfig(
+                system_instruction="Your task is to format the data in json format.",
+                response_mime_type="application/json",
+                response_json_schema=DatabaseResponseFormat.model_json_schema()
+            ),
+            contents=database_informal_response
+        )
+        print("Database Fetched Response:", database_fetched_response_in_formatted.text.strip())
+        for item in json.loads(database_fetched_response_in_formatted.text.strip()).get("items", []):
+            database_fetched_formatted_response.append(item)
+
+    return {"session_id": session_id, "google_search_response": google_search_response_message, "uae_properties": uae_properties, "database_fetched_formatted_response": database_fetched_formatted_response, "ai_message": ai_message}
